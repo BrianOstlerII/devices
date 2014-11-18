@@ -17,7 +17,6 @@
 #include <condition_variable>
 using namespace std;
 #define EXCLUSION Sentry exclusion(this); exclusion.touch();
-
 //Define flags according to the linux standard.
 #define O_RDONLY	0
 #define O_WRONLY	1
@@ -25,20 +24,15 @@ using namespace std;
 #define SEEK_SET	0
 #define SEEK_CUR	1
 #define SEEK_END	2
-
-
-class DeviceDriver;
-
+class Device;
 class Monitor {
 // ...
 };
-
 class Condition {
 public:
 Condition( Monitor* m ) {}
 // ...
 };
-
 class Inode: Monitor {
 	public:
 	int linkCount = 0;
@@ -59,14 +53,14 @@ class Inode: Monitor {
 		//throwaway stuff
 		}
 	}
-	DeviceDriver* driver;
+	Device* driver;
 	string* bytes;
 };
 
 vector<Inode> ilist;
-vector<DeviceDriver*> drivers;
+vector<Device*> drivers;
 
-class DeviceDriver: public Monitor {
+class Device: public Monitor {
 	public:
 	Condition ok2read;
 	Condition ok2write;
@@ -75,17 +69,18 @@ class DeviceDriver: public Monitor {
 	bool writeable;
 	int deviceNumber;
 	string driverName;
-	DeviceDriver(string driverName)
+	Device(string driverName)
 	:Monitor(),ok2read(this),
 	ok2write(this),deviceNumber(drivers.size()),
 	driverName( driverName )
 	{
 		//Added this line, since inode was never initialized.
 		inode = new Inode;
+		inode->driver = this;
 		drivers.push_back(this);
 		++inode->openCount;
 	}
-	~DeviceDriver() {
+	~Device() {
 		--inode->openCount;
 	}
 	virtual int read() {}
@@ -99,13 +94,13 @@ class DeviceDriver: public Monitor {
 	virtual void suspend() {}
 };
 
-class iostreamDevice : DeviceDriver {
+class iostreamDevice : Device {
 	public:
 	int inodeCount = 0;
 	int openCount = 0;
 	iostream* bytes;
 	iostreamDevice( iostream* io )
-	: bytes(io), DeviceDriver("iostreamDevice")
+	: bytes(io), Device("iostreamDevice")
 	{
 		readable = true;
 		writeable = true;
@@ -130,13 +125,13 @@ class iostreamDevice : DeviceDriver {
 	//*/
 };
 
-class stringstreamDevice : DeviceDriver {
+class stringstreamDevice : Device {
 	public:
 	int inodeCount = 0;
 	int openCount = 0;
 	stringstream* bytes;
 	stringstreamDevice( stringstream* ss )
-	: bytes(ss), DeviceDriver("stringstreamDevice")
+	: bytes(ss), Device("stringstreamDevice")
 	{
 		readable = true;
 		writeable = true;
@@ -151,9 +146,9 @@ class stringstreamDevice : DeviceDriver {
 		{
 			readable = true;
 			writeable = false;
-		}	
+		}
 		else if( flags == O_WRONLY )
-		{	
+		{
 			readable = false;
 			writeable = true;
 		}
@@ -162,54 +157,59 @@ class stringstreamDevice : DeviceDriver {
 			readable = true;
 			writeable = true;
 		}
-		return ++openCount;
+		++inodeCount;
+		++openCount;
+		return deviceNumber;
 	}
 	int close( int fd) {
+		cout << "Closing device " << driverName << endl;
 		--openCount;
+		cout << "Device " << driverName << " closed\n";
 		return 0;
 	}
 	int read( int fd, void* buf, size_t count) {
-		stringstream* data;
-		*data << *(ilist[fd].bytes);
-		string* s;
+		Device* ssd = drivers[fd];
+		cerr << "Beginning read from device " << ssd->driverName << endl;
+		char* s = (char*) buf;
 		int i = 0;
-		for( ; i < count && !bytes->eof(); i++)
+		for( ; i < count; i++ )	
 		{
-			*data >> *s;
+			*(s+i) = bytes->get();
 		}
-		buf = s;
 		return i;
 	}
 	int write( int fd, void* buf, size_t count) {
-		stringstream* ss;
+		Device* ssd = drivers[fd];
+		cerr << "Beginning write to device " << ssd->driverName << endl;
+		char* s = (char*) buf;
 		int i = 0;
-		for( ; i < count && !ss->eof(); i++ )
+		for( ; i < count; i++ )	
 		{
-			//Can't access the data pointed to by the void*
+			bytes->put(*s);
+			s++;
 		}
-		*(ilist[fd].bytes) += ss->str();
 		return i;
 	}
 	int seek( int fd, off_t offset, int whence) {
-		//This thing is lying to me.  It says beg, cur, and end aren't
-		//declared when they clearly are in ios_base.
-		//Will finish when my will returns.
-/*		if( whence == SEEK_SET )
+		if( whence == ios_base::SEEK_SET )
 		{
 			bytes->seekg(offset,beg);
+			bytes->seekp(offset,beg);
 		}
-		else if( whence == SEEK_CUR )
+		else if( whence == ios_base::SEEK_CUR )
 		{
 			bytes->seekg(offset,cur);
+			bytes->seekp(offset,cur);
 		}
-		else if( whence == SEEK_END )
+		else if( whence == ios_base::SEEK_END )
 		{
 			bytes->seekg(offset,end)
+			bytes->seekp(offset,end)
 		}
-		return bytes->tellg();*/
+		return offset;
 	}
 	int rewind( int pos ) {
-//		seekg( deviceNumber, pos, SEEK_SET);
+		seek( deviceNumber, 0, SEEK_CUR);
 	}
 	/*
 	int ioctl( ) {
@@ -218,8 +218,34 @@ class stringstreamDevice : DeviceDriver {
 };
 
 int main() {
-	stringstream* ssp = new stringstream;
-	*ssp << "hello world" << endl;
-	stringstreamDevice ssd(ssp);
+	stringstream* ss = new stringstream;
+	stringstreamDevice* ssDevice = new stringstreamDevice(ss);
+	int ssDeviceFd = -1;
+	char writeBuf[14] = "Hello, world!";
+	char* readBuf = new char[14];
+	
+	// Open a file to test our input and output.
+	ssDeviceFd = ssDevice->open("writeTest.txt", 2);
+
+	assert( ssDeviceFd != -1 );
+	cerr << "Write test stream opened, fd = " << ssDeviceFd << "\n";
+	
+	// Read the following data into a Device.
+	ssDevice->write(ssDeviceFd, writeBuf, 14);
+	cerr << "Buffer contents written to write-test stream\n"
+		 << "Bytes: " << (ssDevice->bytes)->str() << endl;
+
+	// Close the file when finished.
+	ssDeviceFd =  (!ssDevice->close(ssDeviceFd))? -1 : ssDeviceFd;
+	assert( ssDeviceFd == -1 );
+	cout << "Write test stream closed\n";
+	
+	// If the file was successfully written to, we can use it to test read.
+	ssDeviceFd = ssDevice->open("writeTest.txt", 2);
+	*ss << "Hello, world!";
+	ssDevice->write(ssDeviceFd, writeBuf, 14);
+	cout << "Stream contents written to read-test stream\n";
+	ssDevice->read(ssDeviceFd, readBuf, 14);
+	cout << "Contents stored in buffer: " << readBuf << endl;
 	
 }
